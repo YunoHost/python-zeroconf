@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+#DH_VERBOSE = 1
+
+#LC_ALL=C.UTF-8 Makes sure that it builds correctly with pbuilder
+
+PYTHON3VERSIONS := $(shell py3versions -s -v)
+
+%:
+	LC_ALL=C.UTF-8 dh $@ --with python3 --buildsystem=pybuild
+
+
+override_dh_auto_build:
+	PYBUILD_VERSIONS="$(PYTHON3VERSIONS)" pybuild --build
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	PYBUILD_VERSIONS="$(PYTHON3VERSIONS)" pybuild --test || true
+endif
+
+override_dh_auto_install:
+	PYBUILD_VERSIONS="$(PYTHON3VERSIONS)" pybuild --install
+
+override_dh_auto_clean:
+	dh_auto_clean
+	$(RM) -r zeroconf.egg-info

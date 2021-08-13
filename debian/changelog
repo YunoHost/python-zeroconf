@@ -1,0 +1,160 @@
+python-zeroconf (0.34.4-1) UNRELEASED; urgency=medium
+
+  * Naive attempt to bump to 0.34.4
+  * Cleanup debian/ folder
+
+ -- Alexandre Aubin <alex.aubin@mailoo.org>  Fri, 13 Aug 2021 11:21:07 +0200
+
+python-zeroconf (0.26.1-2) unstable; urgency=medium
+
+  * d/control: Update Maintainer field with new Debian Python Team
+    contact address.
+  * d/control: Update Vcs-* fields with new Debian Python Team Salsa
+    layout.
+
+ -- Ondřej Nový <onovy@debian.org>  Thu, 24 Sep 2020 08:51:03 +0200
+
+python-zeroconf (0.26.1-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+  * Declare Breaks against an incompatible version of pychromecast.
+  * Remove obsolete field Name from debian/upstream/metadata
+    (already present in machine-readable debian/copyright).
+  * Update standards version to 4.5.0, no changes needed.
+
+ -- Andrej Shadura <andrewsh@debian.org>  Wed, 13 May 2020 13:46:23 +0200
+
+python-zeroconf (0.25.0-2) unstable; urgency=medium
+
+  * Uploading to unstable.
+  * Allow the tests to fail, as they do fail in the buildd env because of no
+    networking, and that's what the package tests. Note that I don't think
+    there's external connectivity, so it should still be policy compliant.
+    (Closes: #958034)
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 08 May 2020 12:51:10 +0200
+
+python-zeroconf (0.25.0-1) experimental; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+  * Add python3-{ifaddr,nose} as build-depends-indep.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 07 Apr 2020 16:55:29 +0200
+
+python-zeroconf (0.23.0-1) unstable; urgency=medium
+
+  [ Ondřej Nový ]
+  * Use debhelper-compat instead of debian/compat.
+
+  [ Ruben Undheim ]
+  * New upstream release
+  * Drop Python 2 package (Closes: #938284)
+  * debian/control:
+    - New standards version 4.4.0 - no changes
+    - DH level 12
+  * debian/rules:
+    - Clean up more in dh_auto_clean
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Fri, 18 Oct 2019 22:32:39 +0200
+
+python-zeroconf (0.21.3-1) unstable; urgency=medium
+
+  * New upstream release
+  * Add version 0.19.1 in debian/python2_old since only that one supports
+    Python 2.
+  * d/p/patches/0001-Set-install_requires-to-enum34-instead-of-enum-compa.patch:
+    - Drop patch
+    - Apply patch to debian/python2_old
+  * debian/rules:
+    - Add specific rules to build Python2 package from debian/python2_old
+      instead of from the top
+    - Override dh_gencontrol such that the Python2 binary package gets version
+      number 0.19.1-3
+  * debian/README.source:
+    - Add README file describing the double-source packaging.
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Thu, 27 Dec 2018 15:54:44 +0100
+
+python-zeroconf (0.19.1-2) unstable; urgency=medium
+
+  [ Ondřej Nový ]
+  * d/control: Set Vcs-* to salsa.debian.org
+  * d/copyright: Use https protocol in Format field
+  * d/changelog: Remove trailing whitespaces
+  * d/control: Remove ancient X-Python3-Version field
+  * Convert git repository from git-dpm to gbp layout
+
+  [ Ruben Undheim ]
+  * d/compat: level 11
+  * d/control:
+    - New standards version 4.2.1 - no changes
+    - debhelper >= 11
+  * (not packaging latest upstream version because it drops Python 2 support,
+     and rdeps depend on that)
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Sat, 22 Sep 2018 12:08:56 +0200
+
+python-zeroconf (0.19.1-1) unstable; urgency=low
+
+  * New upstream release
+  * Upload to unstable
+  * debian/control: New standards version 4.0.0 - no changes
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Thu, 13 Jul 2017 19:42:34 +0000
+
+python-zeroconf (0.18.0-1~exp1) experimental; urgency=low
+
+  * New upstream release
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Fri, 17 Mar 2017 15:27:43 +0100
+
+python-zeroconf (0.17.6-1) unstable; urgency=low
+
+  * New upstream release
+  * debian/control:
+    - New standards version 3.9.8 - no changes
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Thu, 06 Oct 2016 19:05:02 +0200
+
+python-zeroconf (0.17.5-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Wed, 13 Apr 2016 21:02:26 +0200
+
+python-zeroconf (0.17.4-2) unstable; urgency=medium
+
+  * Added patch:
+    - 0001-Set-install_requires-to-enum34-instead-of-enum-compa.patch
+      makes sure that enum-compat is not listed in requires.txt
+  * Remove d/pydist-overrides. Not needed after adding patch.
+  * Updated d/py3dist-overrides to override enum34 to python3
+  * Updated standards to 3.9.7 - no needed changes
+  * Vcs-Git now using https
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Sun, 06 Mar 2016 10:48:16 +0100
+
+python-zeroconf (0.17.4-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Sat, 10 Oct 2015 08:50:44 +0200
+
+python-zeroconf (0.17.2-1) unstable; urgency=low
+
+  * New upstream release
+  * debian/pydist-overrides:
+    - Map enum_compat to python-enum34
+  * debian/py3dist-overrides
+    - In Python 3.4, the enum module is already present. Prevent any
+      dependency on python3-enum34.
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Tue, 25 Aug 2015 18:12:42 +0200
+
+python-zeroconf (0.17.1-1) unstable; urgency=low
+
+  * Initial release (Closes: #786729)
+
+ -- Ruben Undheim <ruben.undheim@gmail.com>  Mon, 25 May 2015 10:46:56 +0200

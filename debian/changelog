@@ -1,4 +1,10 @@
-python-zeroconf (0.34.4-1) UNRELEASED; urgency=medium
+python-zeroconf (0.36.6-1) unstable; urgency=medium
+
+  * Bump to 0.36.6
+
+ -- Alexandre Aubin <alex.aubin@mailoo.org>  Tue, 21 Sep 2021 13:46:53 +0200
+
+python-zeroconf (0.34.4-1) unstable; urgency=medium
 
   * Naive attempt to bump to 0.34.4
   * Cleanup debian/ folder

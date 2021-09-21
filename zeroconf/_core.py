@@ -41,7 +41,8 @@ from ._handlers import (
 )
 from ._history import QuestionHistory
 from ._logger import QuietLogger, log
-from ._protocol import DNSIncoming, DNSOutgoing
+from ._protocol.incoming import DNSIncoming
+from ._protocol.outgoing import DNSOutgoing
 from ._services import ServiceListener
 from ._services.browser import ServiceBrowser
 from ._services.info import ServiceInfo, instance_name_from_service_info
@@ -215,7 +216,8 @@ class AsyncListener(asyncio.Protocol, QuietLogger):
         self.data: Optional[bytes] = None
         self.last_time: float = 0
         self.transport: Optional[asyncio.DatagramTransport] = None
-
+        self.sock_name: Optional[str] = None
+        self.sock_fileno: Optional[int] = None
         self._deferred: Dict[str, List[DNSIncoming]] = {}
         self._timers: Dict[str, asyncio.TimerHandle] = {}
 
@@ -294,15 +296,20 @@ class AsyncListener(asyncio.Protocol, QuietLogger):
             self.zc.handle_response(msg)
             return
 
-        self.handle_query_or_defer(msg, addr, port, v6_flow_scope)
+        self.handle_query_or_defer(msg, addr, port, self.transport, v6_flow_scope)
 
     def handle_query_or_defer(
-        self, msg: DNSIncoming, addr: str, port: int, v6_flow_scope: Union[Tuple[()], Tuple[int, int]] = ()
+        self,
+        msg: DNSIncoming,
+        addr: str,
+        port: int,
+        transport: asyncio.DatagramTransport,
+        v6_flow_scope: Union[Tuple[()], Tuple[int, int]] = (),
     ) -> None:
         """Deal with incoming query packets.  Provides a response if
         possible."""
         if not msg.truncated:
-            self._respond_query(msg, addr, port, v6_flow_scope)
+            self._respond_query(msg, addr, port, transport, v6_flow_scope)
             return
 
         deferred = self._deferred.setdefault(addr, [])
@@ -315,7 +322,7 @@ class AsyncListener(asyncio.Protocol, QuietLogger):
         assert self.zc.loop is not None
         self._cancel_any_timers_for_addr(addr)
         self._timers[addr] = self.zc.loop.call_later(
-            delay, self._respond_query, None, addr, port, v6_flow_scope
+            delay, self._respond_query, None, addr, port, transport, v6_flow_scope
         )
 
     def _cancel_any_timers_for_addr(self, addr: str) -> None:
@@ -328,6 +335,7 @@ class AsyncListener(asyncio.Protocol, QuietLogger):
         msg: Optional[DNSIncoming],
         addr: str,
         port: int,
+        transport: asyncio.DatagramTransport,
         v6_flow_scope: Union[Tuple[()], Tuple[int, int]] = (),
     ) -> None:
         """Respond to a query and reassemble any truncated deferred packets."""
@@ -336,15 +344,12 @@ class AsyncListener(asyncio.Protocol, QuietLogger):
         if msg:
             packets.append(msg)
 
-        self.zc.handle_assembled_query(packets, addr, port, v6_flow_scope)
+        self.zc.handle_assembled_query(packets, addr, port, transport, v6_flow_scope)
 
     @property
     def _socket_description(self) -> str:
         """A human readable description of the socket."""
-        assert self.transport is not None
-        fileno = self.transport.get_extra_info('socket').fileno()
-        sockname = self.transport.get_extra_info('sockname')
-        return f"{fileno} ({sockname})"
+        return f"{self.sock_fileno} ({self.sock_name})"
 
     def error_received(self, exc: Exception) -> None:
         """Likely socket closed or IPv6."""
@@ -357,6 +362,8 @@ class AsyncListener(asyncio.Protocol, QuietLogger):
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = cast(asyncio.DatagramTransport, transport)
+        self.sock_name = self.transport.get_extra_info('sockname')
+        self.sock_fileno = self.transport.get_extra_info('socket').fileno()
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         """Handle connection lost."""
@@ -394,12 +401,12 @@ class Zeroconf(QuietLogger):
         if ip_version is None:
             ip_version = autodetect_ip_version(interfaces)
 
-        # hook for threads
-        self._GLOBAL_DONE = False
+        self.done = False
 
         if apple_p2p and sys.platform != 'darwin':
             raise RuntimeError('Option `apple_p2p` is not supported on non-Apple platforms.')
 
+        self.unicast = unicast
         listen_socket, respond_sockets = create_sockets(interfaces, unicast, ip_version, apple_p2p=apple_p2p)
         log.debug('Listen socket %s, respond sockets %s', listen_socket, respond_sockets)
 
@@ -448,10 +455,6 @@ class Zeroconf(QuietLogger):
     async def async_wait_for_start(self) -> None:
         """Wait for start up."""
         await self.engine.async_wait_for_start()
-
-    @property
-    def done(self) -> bool:
-        return self._GLOBAL_DONE
 
     @property
     def listeners(self) -> List[RecordUpdateListener]:
@@ -564,17 +567,28 @@ class Zeroconf(QuietLogger):
         self.registry.async_update(info)
         return asyncio.ensure_future(self._async_broadcast_service(info, _REGISTER_TIME, None))
 
-    async def _async_broadcast_service(self, info: ServiceInfo, interval: int, ttl: Optional[int]) -> None:
+    async def _async_broadcast_service(
+        self,
+        info: ServiceInfo,
+        interval: int,
+        ttl: Optional[int],
+        broadcast_addresses: bool = True,
+    ) -> None:
         """Send a broadcasts to announce a service at intervals."""
         for i in range(_REGISTER_BROADCASTS):
             if i != 0:
                 await asyncio.sleep(millis_to_seconds(interval))
-            self.async_send(self.generate_service_broadcast(info, ttl))
+            self.async_send(self.generate_service_broadcast(info, ttl, broadcast_addresses))
 
-    def generate_service_broadcast(self, info: ServiceInfo, ttl: Optional[int]) -> DNSOutgoing:
+    def generate_service_broadcast(
+        self,
+        info: ServiceInfo,
+        ttl: Optional[int],
+        broadcast_addresses: bool = True,
+    ) -> DNSOutgoing:
         """Generate a broadcast to announce a service."""
         out = DNSOutgoing(_FLAGS_QR_RESPONSE | _FLAGS_AA)
-        self._add_broadcast_answer(out, info, ttl)
+        self._add_broadcast_answer(out, info, ttl, broadcast_addresses)
         return out
 
     def generate_service_query(self, info: ServiceInfo) -> DNSOutgoing:  # pylint: disable=no-self-use
@@ -593,7 +607,11 @@ class Zeroconf(QuietLogger):
         return out
 
     def _add_broadcast_answer(  # pylint: disable=no-self-use
-        self, out: DNSOutgoing, info: ServiceInfo, override_ttl: Optional[int]
+        self,
+        out: DNSOutgoing,
+        info: ServiceInfo,
+        override_ttl: Optional[int],
+        broadcast_addresses: bool = True,
     ) -> None:
         """Add answers to broadcast a service."""
         now = current_time_millis()
@@ -602,8 +620,9 @@ class Zeroconf(QuietLogger):
         out.add_answer_at_time(info.dns_pointer(override_ttl=other_ttl, created=now), 0)
         out.add_answer_at_time(info.dns_service(override_ttl=host_ttl, created=now), 0)
         out.add_answer_at_time(info.dns_text(override_ttl=other_ttl, created=now), 0)
-        for dns_address in info.dns_addresses(override_ttl=host_ttl, created=now):
-            out.add_answer_at_time(dns_address, 0)
+        if broadcast_addresses:
+            for dns_address in info.dns_addresses(override_ttl=host_ttl, created=now):
+                out.add_answer_at_time(dns_address, 0)
 
     def unregister_service(self, info: ServiceInfo) -> None:
         """Unregister a service."""
@@ -615,7 +634,14 @@ class Zeroconf(QuietLogger):
     async def async_unregister_service(self, info: ServiceInfo) -> Awaitable:
         """Unregister a service."""
         self.registry.async_remove(info)
-        return asyncio.ensure_future(self._async_broadcast_service(info, _UNREGISTER_TIME, 0))
+        # If another server uses the same addresses, we do not want to send
+        # goodbye packets for the address records
+
+        entries = self.registry.async_get_infos_server(info.server)
+        broadcast_addresses = not bool(entries)
+        return asyncio.ensure_future(
+            self._async_broadcast_service(info, _UNREGISTER_TIME, 0, broadcast_addresses)
+        )
 
     def generate_unregister_all_services(self) -> Optional[DNSOutgoing]:
         """Generate a DNSOutgoing goodbye for all services and remove them from the registry."""
@@ -732,6 +758,7 @@ class Zeroconf(QuietLogger):
         packets: List[DNSIncoming],
         addr: str,
         port: int,
+        transport: asyncio.DatagramTransport,
         v6_flow_scope: Union[Tuple[()], Tuple[int, int]] = (),
     ) -> None:
         """Respond to a (re)assembled query.
@@ -749,7 +776,10 @@ class Zeroconf(QuietLogger):
             questions = packets[0].questions
             id_ = packets[0].id
             out = construct_outgoing_unicast_answers(question_answers.ucast, ucast_source, questions, id_)
-            self.async_send(out, addr, port, v6_flow_scope)
+            # When sending unicast, only send back the reply
+            # via the same socket that it was recieved from
+            # as we know its reachable from that socket
+            self.async_send(out, addr, port, v6_flow_scope, transport)
         if question_answers.mcast_now:
             self.async_send(construct_outgoing_multicast_answers(question_answers.mcast_now))
         if question_answers.mcast_aggregate:
@@ -766,10 +796,11 @@ class Zeroconf(QuietLogger):
         addr: Optional[str] = None,
         port: int = _MDNS_PORT,
         v6_flow_scope: Union[Tuple[()], Tuple[int, int]] = (),
+        transport: Optional[asyncio.DatagramTransport] = None,
     ) -> None:
         """Sends an outgoing packet threadsafe."""
         assert self.loop is not None
-        self.loop.call_soon_threadsafe(self.async_send, out, addr, port, v6_flow_scope)
+        self.loop.call_soon_threadsafe(self.async_send, out, addr, port, v6_flow_scope, transport)
 
     def async_send(
         self,
@@ -777,40 +808,65 @@ class Zeroconf(QuietLogger):
         addr: Optional[str] = None,
         port: int = _MDNS_PORT,
         v6_flow_scope: Union[Tuple[()], Tuple[int, int]] = (),
+        transport: Optional[asyncio.DatagramTransport] = None,
     ) -> None:
         """Sends an outgoing packet."""
-        if self._GLOBAL_DONE:
+        if self.done:
             return
+
+        # If no transport is specified, we send to all the ones
+        # with the same address family
+        transports = [transport] if transport else self.engine.senders
 
         for packet_num, packet in enumerate(out.packets()):
             if len(packet) > _MAX_MSG_ABSOLUTE:
                 self.log_warning_once("Dropping %r over-sized packet (%d bytes) %r", out, len(packet), packet)
                 return
-            log.debug(
-                'Sending to (%s, %d) (%d bytes #%d) %r as %r...',
-                addr,
-                port,
-                len(packet),
-                packet_num + 1,
-                out,
-                packet,
-            )
-            for transport in self.engine.senders:
-                s = transport.get_extra_info('socket')
-                if addr is None:
-                    real_addr = _MDNS_ADDR6 if s.family == socket.AF_INET6 else _MDNS_ADDR
-                elif not can_send_to(s, addr):
-                    continue
-                else:
-                    real_addr = addr
-                transport.sendto(packet, (real_addr, port or _MDNS_PORT, *v6_flow_scope))
+            for send_transport in transports:
+                self._async_send_transport(send_transport, packet, packet_num, out, addr, port, v6_flow_scope)
+
+    def _async_send_transport(
+        self,
+        transport: asyncio.DatagramTransport,
+        packet: bytes,
+        packet_num: int,
+        out: DNSOutgoing,
+        addr: Optional[str],
+        port: int,
+        v6_flow_scope: Union[Tuple[()], Tuple[int, int]] = (),
+    ) -> None:
+        s = transport.get_extra_info('socket')
+        ipv6_socket = s.family == socket.AF_INET6
+        if addr is None:
+            real_addr = _MDNS_ADDR6 if ipv6_socket else _MDNS_ADDR
+        else:
+            real_addr = addr
+            if not can_send_to(ipv6_socket, real_addr):
+                return
+        log.debug(
+            'Sending to (%s, %d) via [socket %s (%s)] (%d bytes #%d) %r as %r...',
+            real_addr,
+            port or _MDNS_PORT,
+            s.fileno(),
+            transport.get_extra_info('sockname'),
+            len(packet),
+            packet_num + 1,
+            out,
+            packet,
+        )
+        # Get flowinfo and scopeid for the IPV6 socket to create a complete IPv6
+        # address tuple: https://docs.python.org/3.6/library/socket.html#socket-families
+        if ipv6_socket and not v6_flow_scope:
+            _, _, sock_flowinfo, sock_scopeid = s.getsockname()
+            v6_flow_scope = (sock_flowinfo, sock_scopeid)
+        transport.sendto(packet, (real_addr, port or _MDNS_PORT, *v6_flow_scope))
 
     def _close(self) -> None:
         """Set global done and remove all service listeners."""
-        if self._GLOBAL_DONE:
+        if self.done:
             return
         self.remove_all_service_listeners()
-        self._GLOBAL_DONE = True
+        self.done = True
 
     def _shutdown_threads(self) -> None:
         """Shutdown any threads."""

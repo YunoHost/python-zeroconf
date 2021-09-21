@@ -26,15 +26,18 @@ from collections import deque
 from typing import Dict, Iterable, List, NamedTuple, Optional, Set, TYPE_CHECKING, Tuple, Union, cast
 
 from ._cache import DNSCache, _UniqueRecordsType
-from ._dns import DNSAddress, DNSPointer, DNSQuestion, DNSRRSet, DNSRecord
+from ._dns import DNSAddress, DNSNsec, DNSPointer, DNSQuestion, DNSRRSet, DNSRecord
 from ._history import QuestionHistory
 from ._logger import log
-from ._protocol import DNSIncoming, DNSOutgoing
+from ._protocol.incoming import DNSIncoming
+from ._protocol.outgoing import DNSOutgoing
+from ._services.info import ServiceInfo
 from ._services.registry import ServiceRegistry
 from ._updates import RecordUpdate, RecordUpdateListener
 from ._utils.time import current_time_millis, millis_to_seconds
 from .const import (
     _CLASS_IN,
+    _CLASS_UNIQUE,
     _DNS_OTHER_TTL,
     _DNS_PTR_MIN_TTL,
     _FLAGS_AA,
@@ -44,6 +47,7 @@ from .const import (
     _TYPE_A,
     _TYPE_AAAA,
     _TYPE_ANY,
+    _TYPE_NSEC,
     _TYPE_PTR,
     _TYPE_SRV,
     _TYPE_TXT,
@@ -56,7 +60,8 @@ if TYPE_CHECKING:
 _AnswerWithAdditionalsType = Dict[DNSRecord, Set[DNSRecord]]
 
 _MULTICAST_DELAY_RANDOM_INTERVAL = (20, 120)
-_RESPOND_IMMEDIATE_TYPES = {_TYPE_SRV, _TYPE_A, _TYPE_AAAA}
+_ADDRESS_RECORD_TYPES = {_TYPE_A, _TYPE_AAAA}
+_RESPOND_IMMEDIATE_TYPES = {_TYPE_NSEC, _TYPE_SRV, *_ADDRESS_RECORD_TYPES}
 
 
 class QuestionAnswers(NamedTuple):
@@ -76,6 +81,15 @@ class AnswerGroup(NamedTuple):
 
 def _message_is_probe(msg: DNSIncoming) -> bool:
     return msg.num_authorities > 0
+
+
+def construct_nsec_record(name: str, types: List[int], now: float) -> DNSNsec:
+    """Construct an NSEC record for name and a list of dns types.
+
+    This function should only be used for SRV/A/AAAA records
+    which have a TTL of _DNS_OTHER_TTL
+    """
+    return DNSNsec(name, _TYPE_NSEC, _CLASS_IN | _CLASS_UNIQUE, _DNS_OTHER_TTL, name, types, created=now)
 
 
 def construct_outgoing_multicast_answers(answers: _AnswerWithAdditionalsType) -> DNSOutgoing:
@@ -244,12 +258,23 @@ class QueryHandler:
             # Add recommended additional answers according to
             # https://tools.ietf.org/html/rfc6763#section-12.1.
             dns_pointer = service.dns_pointer(created=now)
-            if not known_answers.suppresses(dns_pointer):
-                answer_set[dns_pointer] = {
-                    service.dns_service(created=now),
-                    service.dns_text(created=now),
-                    *service.dns_addresses(created=now),
-                }
+            if known_answers.suppresses(dns_pointer):
+                continue
+            additionals: Set[DNSRecord] = {service.dns_service(created=now), service.dns_text(created=now)}
+            additionals |= self._get_address_and_nsec_records(service, now)
+            answer_set[dns_pointer] = additionals
+
+    def _get_address_and_nsec_records(self, service: ServiceInfo, now: float) -> Set[DNSRecord]:
+        """Build a set of address records and NSEC records for non-present record types."""
+        seen_types: Set[int] = set()
+        records: Set[DNSRecord] = set()
+        for dns_address in service.dns_addresses(created=now):
+            seen_types.add(dns_address.type)
+            records.add(dns_address)
+        missing_types: Set[int] = _ADDRESS_RECORD_TYPES - seen_types
+        if missing_types:
+            records.add(construct_nsec_record(service.server, list(missing_types), now))
+        return records
 
     def _add_address_answers(
         self,
@@ -263,13 +288,21 @@ class QueryHandler:
         for service in self.registry.async_get_infos_server(name):
             answers: List[DNSAddress] = []
             additionals: Set[DNSRecord] = set()
+            seen_types: Set[int] = set()
             for dns_address in service.dns_addresses(created=now):
+                seen_types.add(dns_address.type)
                 if dns_address.type != type_:
                     additionals.add(dns_address)
                 elif not known_answers.suppresses(dns_address):
                     answers.append(dns_address)
-            for answer in answers:
-                answer_set[answer] = additionals
+            missing_types: Set[int] = _ADDRESS_RECORD_TYPES - seen_types
+            if answers:
+                if missing_types:
+                    additionals.add(construct_nsec_record(service.server, list(missing_types), now))
+                for answer in answers:
+                    answer_set[answer] = additionals
+            elif type_ in missing_types:
+                answer_set[construct_nsec_record(service.server, list(missing_types), now)] = set()
 
     def _answer_question(
         self,
@@ -299,7 +332,7 @@ class QueryHandler:
                     # https://tools.ietf.org/html/rfc6763#section-12.2.
                     dns_service = service.dns_service(created=now)
                     if not known_answers.suppresses(dns_service):
-                        answer_set[dns_service] = set(service.dns_addresses(created=now))
+                        answer_set[dns_service] = self._get_address_and_nsec_records(service, now)
                 if type_ in (_TYPE_TXT, _TYPE_ANY):
                     dns_text = service.dns_text(created=now)
                     if not known_answers.suppresses(dns_text):
@@ -316,7 +349,7 @@ class QueryHandler:
         threadsafe.
         """
         known_answers = DNSRRSet(
-            itertools.chain(*(msg.answers for msg in msgs if not _message_is_probe(msg)))
+            itertools.chain.from_iterable(msg.answers for msg in msgs if not _message_is_probe(msg))
         )
         query_res = _QueryResponse(self.cache, msgs)
 
@@ -527,10 +560,16 @@ class MulticastOutgoingQueue:
                 last_group.answers.update(answers)
                 return
         else:
-            self.zc.loop.call_later(millis_to_seconds(random_delay), self._async_ready)
+            self.zc.loop.call_later(millis_to_seconds(random_delay), self.async_ready)
         self.queue.append(AnswerGroup(send_after, send_before, answers))
 
-    def _async_ready(self) -> None:
+    def _remove_answers_from_queue(self, answers: _AnswerWithAdditionalsType) -> None:
+        """Remove a set of answers from the outgoing queue."""
+        for pending in self.queue:
+            for record in answers:
+                pending.answers.pop(record, None)
+
+    def async_ready(self) -> None:
         """Process anything in the queue that is ready."""
         assert self.zc.loop is not None
         now = current_time_millis()
@@ -538,7 +577,7 @@ class MulticastOutgoingQueue:
         if len(self.queue) > 1 and self.queue[0].send_before > now:
             # There is more than one answer in the queue,
             # delay until we have to send it (first answer group reaches send_before)
-            self.zc.loop.call_later(millis_to_seconds(self.queue[0].send_before - now), self._async_ready)
+            self.zc.loop.call_later(millis_to_seconds(self.queue[0].send_before - now), self.async_ready)
             return
 
         answers: _AnswerWithAdditionalsType = {}
@@ -549,12 +588,9 @@ class MulticastOutgoingQueue:
         if len(self.queue):
             # If there are still groups in the queue that are not ready to send
             # be sure we schedule them to go out later
-            self.zc.loop.call_later(millis_to_seconds(self.queue[0].send_after - now), self._async_ready)
+            self.zc.loop.call_later(millis_to_seconds(self.queue[0].send_after - now), self.async_ready)
 
         if answers:
-            # If we have the same answer scheduled to go out, remove it
-            for pending in self.queue:
-                for record in answers:
-                    pending.answers.pop(record, None)
-
+            # If we have the same answer scheduled to go out, remove them
+            self._remove_answers_from_queue(answers)
             self.zc.async_send(construct_outgoing_multicast_answers(answers))

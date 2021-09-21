@@ -22,296 +22,42 @@
 
 import enum
 import struct
-from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-
-from ._dns import DNSAddress, DNSHinfo, DNSNsec, DNSPointer, DNSQuestion, DNSRecord, DNSService, DNSText
-from ._exceptions import IncomingDecodeError, NamePartTooLongException
-from ._logger import QuietLogger, log
-from ._utils.struct import int2byte
-from ._utils.time import current_time_millis
-from .const import (
+from . import DNSMessage
+from .incoming import DNSIncoming
+from .._cache import DNSCache
+from .._dns import DNSPointer, DNSQuestion, DNSRecord
+from .._exceptions import NamePartTooLongException
+from .._logger import log
+from ..const import (
     _CLASS_UNIQUE,
     _DNS_PACKET_HEADER_LEN,
-    _FLAGS_QR_MASK,
-    _FLAGS_QR_QUERY,
-    _FLAGS_QR_RESPONSE,
     _FLAGS_TC,
     _MAX_MSG_ABSOLUTE,
     _MAX_MSG_TYPICAL,
-    _TYPES,
-    _TYPE_A,
-    _TYPE_AAAA,
-    _TYPE_CNAME,
-    _TYPE_HINFO,
-    _TYPE_NSEC,
-    _TYPE_PTR,
-    _TYPE_SRV,
-    _TYPE_TXT,
 )
-
-DNS_COMPRESSION_HEADER_LEN = 1
-DNS_COMPRESSION_POINTER_LEN = 2
-MAX_DNS_LABELS = 128
-MAX_NAME_LENGTH = 253
-
-DECODE_EXCEPTIONS = (IndexError, struct.error, IncomingDecodeError)
-
-if TYPE_CHECKING:
-    from ._cache import DNSCache
-
-
-class DNSMessage:
-    """A base class for DNS messages."""
-
-    def __init__(self, flags: int) -> None:
-        """Construct a DNS message."""
-        self.flags = flags
-
-    def is_query(self) -> bool:
-        """Returns true if this is a query."""
-        return (self.flags & _FLAGS_QR_MASK) == _FLAGS_QR_QUERY
-
-    def is_response(self) -> bool:
-        """Returns true if this is a response."""
-        return (self.flags & _FLAGS_QR_MASK) == _FLAGS_QR_RESPONSE
-
-    @property
-    def truncated(self) -> bool:
-        """Returns true if this is a truncated."""
-        return (self.flags & _FLAGS_TC) == _FLAGS_TC
-
-
-class DNSIncoming(DNSMessage, QuietLogger):
-
-    """Object representation of an incoming DNS packet"""
-
-    def __init__(self, data: bytes, scope_id: Optional[int] = None, now: Optional[float] = None) -> None:
-        """Constructor from string holding bytes of packet"""
-        super().__init__(0)
-        self.offset = 0
-        self.data = data
-        self.data_len = len(data)
-        self.name_cache: Dict[int, List[str]] = {}
-        self.seen_pointers: Set[int] = set()
-        self.questions: List[DNSQuestion] = []
-        self.answers: List[DNSRecord] = []
-        self.id = 0
-        self.num_questions = 0
-        self.num_answers = 0
-        self.num_authorities = 0
-        self.num_additionals = 0
-        self.valid = False
-        self.now = now or current_time_millis()
-        self.scope_id = scope_id
-
-        try:
-            self.read_header()
-            self.read_questions()
-            self.read_others()
-            self.valid = True
-        except DECODE_EXCEPTIONS:
-            self.log_exception_warning('Choked at offset %d while unpacking %r', self.offset, data)
-
-    def __repr__(self) -> str:
-        return '<DNSIncoming:{%s}>' % ', '.join(
-            [
-                'id=%s' % self.id,
-                'flags=%s' % self.flags,
-                'truncated=%s' % self.truncated,
-                'n_q=%s' % self.num_questions,
-                'n_ans=%s' % self.num_answers,
-                'n_auth=%s' % self.num_authorities,
-                'n_add=%s' % self.num_additionals,
-                'questions=%s' % self.questions,
-                'answers=%s' % self.answers,
-            ]
-        )
-
-    def unpack(self, format_: bytes) -> tuple:
-        length = struct.calcsize(format_)
-        info = struct.unpack(format_, self.data[self.offset : self.offset + length])
-        self.offset += length
-        return info
-
-    def read_header(self) -> None:
-        """Reads header portion of packet"""
-        (
-            self.id,
-            self.flags,
-            self.num_questions,
-            self.num_answers,
-            self.num_authorities,
-            self.num_additionals,
-        ) = self.unpack(b'!6H')
-
-    def read_questions(self) -> None:
-        """Reads questions section of packet"""
-        for _ in range(self.num_questions):
-            name = self.read_name()
-            type_, class_ = self.unpack(b'!HH')
-
-            question = DNSQuestion(name, type_, class_)
-            self.questions.append(question)
-
-    def read_character_string(self) -> bytes:
-        """Reads a character string from the packet"""
-        length = self.data[self.offset]
-        self.offset += 1
-        return self.read_string(length)
-
-    def read_string(self, length: int) -> bytes:
-        """Reads a string of a given length from the packet"""
-        info = self.data[self.offset : self.offset + length]
-        self.offset += length
-        return info
-
-    def read_unsigned_short(self) -> int:
-        """Reads an unsigned short from the packet"""
-        return cast(int, self.unpack(b'!H')[0])
-
-    def read_others(self) -> None:
-        """Reads the answers, authorities and additionals section of the
-        packet"""
-        n = self.num_answers + self.num_authorities + self.num_additionals
-        for _ in range(n):
-            domain = self.read_name()
-            type_, class_, ttl, length = self.unpack(b'!HHiH')
-            end = self.offset + length
-            rec = None
-            try:
-                rec = self.read_record(domain, type_, class_, ttl, length)
-            except DECODE_EXCEPTIONS:
-                # Skip records that fail to decode if we know the length
-                # If the packet is really corrupt read_name and the unpack
-                # above would fail and hit the exception catch in read_others
-                self.offset = end
-                log.debug(
-                    'Unable to parse; skipping record for %s with type %s at offset %d while unpacking %r',
-                    domain,
-                    _TYPES.get(type_, type_),
-                    self.offset,
-                    self.data,
-                    exc_info=True,
-                )
-            if rec is not None:
-                self.answers.append(rec)
-
-    def read_record(self, domain: str, type_: int, class_: int, ttl: int, length: int) -> Optional[DNSRecord]:
-        """Read known records types and skip unknown ones."""
-        if type_ == _TYPE_A:
-            return DNSAddress(domain, type_, class_, ttl, self.read_string(4), created=self.now)
-        if type_ in (_TYPE_CNAME, _TYPE_PTR):
-            return DNSPointer(domain, type_, class_, ttl, self.read_name(), self.now)
-        if type_ == _TYPE_TXT:
-            return DNSText(domain, type_, class_, ttl, self.read_string(length), self.now)
-        if type_ == _TYPE_SRV:
-            return DNSService(
-                domain,
-                type_,
-                class_,
-                ttl,
-                self.read_unsigned_short(),
-                self.read_unsigned_short(),
-                self.read_unsigned_short(),
-                self.read_name(),
-                self.now,
-            )
-        if type_ == _TYPE_HINFO:
-            return DNSHinfo(
-                domain,
-                type_,
-                class_,
-                ttl,
-                self.read_character_string().decode('utf-8'),
-                self.read_character_string().decode('utf-8'),
-                self.now,
-            )
-        if type_ == _TYPE_AAAA:
-            return DNSAddress(
-                domain, type_, class_, ttl, self.read_string(16), created=self.now, scope_id=self.scope_id
-            )
-        if type_ == _TYPE_NSEC:
-            name_start = self.offset
-            return DNSNsec(
-                domain,
-                type_,
-                class_,
-                ttl,
-                self.read_name(),
-                self.read_bitmap(name_start + length),
-                self.now,
-            )
-        # Try to ignore types we don't know about
-        # Skip the payload for the resource record so the next
-        # records can be parsed correctly
-        self.offset += length
-        return None
-
-    def read_bitmap(self, end: int) -> List[int]:
-        """Reads an NSEC bitmap from the packet."""
-        rdtypes = []
-        while self.offset < end:
-            window = self.data[self.offset]
-            bitmap_length = self.data[self.offset + 1]
-            for i, byte in enumerate(self.data[self.offset + 2 : self.offset + 2 + bitmap_length]):
-                for bit in range(0, 8):
-                    if byte & (0x80 >> bit):
-                        rdtypes.append(bit + window * 256 + i * 8)
-            self.offset += 2 + bitmap_length
-        return rdtypes
-
-    def read_name(self) -> str:
-        """Reads a domain name from the packet."""
-        labels: List[str] = []
-        self.seen_pointers.clear()
-        self.offset = self._decode_labels_at_offset(self.offset, labels)
-        labels.append("")
-        name = ".".join(labels)
-        if len(name) > MAX_NAME_LENGTH:
-            raise IncomingDecodeError(f"DNS name {name} exceeds maximum length of {MAX_NAME_LENGTH}")
-        return name
-
-    def _decode_labels_at_offset(self, off: int, labels: List[str]) -> int:
-        # This is a tight loop that is called frequently, small optimizations can make a difference.
-        while off < self.data_len:
-            length = self.data[off]
-            if length == 0:
-                return off + DNS_COMPRESSION_HEADER_LEN
-
-            if length < 0x40:
-                label_idx = off + DNS_COMPRESSION_HEADER_LEN
-                labels.append(str(self.data[label_idx : label_idx + length], 'utf-8', 'replace'))
-                off += DNS_COMPRESSION_HEADER_LEN + length
-                continue
-
-            if length < 0xC0:
-                raise IncomingDecodeError(f"DNS compression type {length} is unknown at {off}")
-
-            # We have a DNS compression pointer
-            link = (length & 0x3F) * 256 + self.data[off + 1]
-            if link > self.data_len:
-                raise IncomingDecodeError(f"DNS compression pointer at {off} points to {link} beyond packet")
-            if link == off:
-                raise IncomingDecodeError(f"DNS compression pointer at {off} points to itself")
-            if link in self.seen_pointers:
-                raise IncomingDecodeError(f"DNS compression pointer at {off} was seen again")
-            self.seen_pointers.add(link)
-            linked_labels = self.name_cache.get(link, [])
-            if not linked_labels:
-                self._decode_labels_at_offset(link, linked_labels)
-                self.name_cache[link] = linked_labels
-            labels.extend(linked_labels)
-            if len(labels) > MAX_DNS_LABELS:
-                raise IncomingDecodeError(f"Maximum dns labels reached while processing pointer at {off}")
-            return off + DNS_COMPRESSION_POINTER_LEN
-
-        raise IncomingDecodeError("Corrupt packet received while decoding name")
 
 
 class DNSOutgoing(DNSMessage):
 
     """Object representation of an outgoing packet"""
+
+    __slots__ = (
+        'finished',
+        'id',
+        'multicast',
+        'packets_data',
+        'names',
+        'data',
+        'size',
+        'allow_long',
+        'state',
+        'questions',
+        'answers',
+        'authorities',
+        'additionals',
+    )
 
     def __init__(self, flags: int, multicast: bool = True, id_: int = 0) -> None:
         super().__init__(flags)
@@ -434,13 +180,13 @@ class DNSOutgoing(DNSMessage):
         for cached_entry in cached_entries:
             self.add_answer_at_time(cached_entry, now)
 
-    def _pack(self, format_: Union[bytes, str], value: Any) -> None:
+    def _pack(self, format_: Union[bytes, str], size: int, value: Any) -> None:
         self.data.append(struct.pack(format_, value))
-        self.size += struct.calcsize(format_)
+        self.size += size
 
     def _write_byte(self, value: int) -> None:
         """Writes a single byte to the packet"""
-        self._pack(b'!c', int2byte(value))
+        self._pack(b'!c', 1, bytes((value,)))
 
     def _insert_short_at_start(self, value: int) -> None:
         """Inserts an unsigned short at the start of the packet"""
@@ -452,11 +198,11 @@ class DNSOutgoing(DNSMessage):
 
     def write_short(self, value: int) -> None:
         """Writes an unsigned short to the packet"""
-        self._pack(b'!H', value)
+        self._pack(b'!H', 2, value)
 
     def _write_int(self, value: Union[float, int]) -> None:
         """Writes an unsigned integer to the packet"""
-        self._pack(b'!I', int(value))
+        self._pack(b'!I', 4, int(value))
 
     def write_string(self, value: bytes) -> None:
         """Writes a string to the packet"""
@@ -495,38 +241,29 @@ class DNSOutgoing(DNSMessage):
         """
 
         # split name into each label
-        parts = name.split('.')
-        if not parts[-1]:
-            parts.pop()
+        name_length = None
+        if name.endswith('.'):
+            name = name[: len(name) - 1]
+        labels = name.split('.')
+        # Write each new label or a pointer to the existing
+        # on in the packet
+        start_size = self.size
+        for count in range(len(labels)):
+            label = name if count == 0 else '.'.join(labels[count:])
+            index = self.names.get(label)
+            if index:
+                # If part of the name already exists in the packet,
+                # create a pointer to it
+                self._write_byte((index >> 8) | 0xC0)
+                self._write_byte(index & 0xFF)
+                return
+            if name_length is None:
+                name_length = len(name.encode('utf-8'))
+            self.names[label] = start_size + name_length - len(label.encode('utf-8'))
+            self._write_utf(labels[count])
 
-        # construct each suffix
-        name_suffices = ['.'.join(parts[i:]) for i in range(len(parts))]
-
-        # look for an existing name or suffix
-        for count, sub_name in enumerate(name_suffices):
-            if sub_name in self.names:
-                break
-        else:
-            count = len(name_suffices)
-
-        # note the new names we are saving into the packet
-        name_length = len(name.encode('utf-8'))
-        for suffix in name_suffices[:count]:
-            self.names[suffix] = self.size + name_length - len(suffix.encode('utf-8')) - 1
-
-        # write the new names out.
-        for part in parts[:count]:
-            self._write_utf(part)
-
-        # if we wrote part of the name, create a pointer to the rest
-        if count != len(name_suffices):
-            # Found substring in packet, create pointer
-            index = self.names[name_suffices[count]]
-            self._write_byte((index >> 8) | 0xC0)
-            self._write_byte(index & 0xFF)
-        else:
-            # this is the end of a name
-            self._write_byte(0)
+        # this is the end of a name
+        self._write_byte(0)
 
     def _write_question(self, question: DNSQuestion) -> bool:
         """Writes a question to the packet"""
@@ -599,21 +336,13 @@ class DNSOutgoing(DNSMessage):
             answers_written += 1
         return answers_written
 
-    def _write_authorities_from_offset(self, authority_offset: int) -> int:
-        authorities_written = 0
-        for authority in self.authorities[authority_offset:]:
-            if not self._write_record(authority, 0):
+    def _write_records_from_offset(self, records: Sequence[DNSRecord], offset: int) -> int:
+        records_written = 0
+        for record in records[offset:]:
+            if not self._write_record(record, 0):
                 break
-            authorities_written += 1
-        return authorities_written
-
-    def _write_additionals_from_offset(self, additional_offset: int) -> int:
-        additionals_written = 0
-        for additional in self.additionals[additional_offset:]:
-            if not self._write_record(additional, 0):
-                break
-            additionals_written += 1
-        return additionals_written
+            records_written += 1
+        return records_written
 
     def _has_more_to_add(
         self, questions_offset: int, answer_offset: int, authority_offset: int, additional_offset: int
@@ -667,8 +396,8 @@ class DNSOutgoing(DNSMessage):
 
             questions_written = self._write_questions_from_offset(questions_offset)
             answers_written = self._write_answers_from_offset(answer_offset)
-            authorities_written = self._write_authorities_from_offset(authority_offset)
-            additionals_written = self._write_additionals_from_offset(additional_offset)
+            authorities_written = self._write_records_from_offset(self.authorities, authority_offset)
+            additionals_written = self._write_records_from_offset(self.additionals, additional_offset)
 
             self._insert_short_at_start(additionals_written)
             self._insert_short_at_start(authorities_written)

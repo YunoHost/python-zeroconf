@@ -46,7 +46,8 @@ from ._exceptions import (  # noqa # import needed for backwards compat
     NonUniqueNameException,
     ServiceNameAlreadyRegistered,
 )
-from ._protocol import DNSIncoming, DNSOutgoing  # noqa # import needed for backwards compat
+from ._protocol.incoming import DNSIncoming  # noqa # import needed for backwards compat
+from ._protocol.outgoing import DNSOutgoing  # noqa # import needed for backwards compat
 from ._services import (  # noqa # import needed for backwards compat
     Signal,
     SignalRegistrationInterface,
@@ -66,7 +67,6 @@ from ._updates import RecordUpdate, RecordUpdateListener  # noqa # import needed
 from ._utils.name import service_type_name  # noqa # import needed for backwards compat
 from ._utils.net import (  # noqa # import needed for backwards compat
     add_multicast_member,
-    can_send_to,
     autodetect_ip_version,
     create_sockets,
     get_all_addresses_v6,
@@ -75,12 +75,11 @@ from ._utils.net import (  # noqa # import needed for backwards compat
     IPVersion,
     get_all_addresses,
 )
-from ._utils.struct import int2byte  # noqa # import needed for backwards compat
 from ._utils.time import current_time_millis, millis_to_seconds  # noqa # import needed for backwards compat
 
 __author__ = 'Paul Scott-Murphy, William McBrine'
 __maintainer__ = 'Jakub Stasiak <jakub@stasiak.at>'
-__version__ = '0.34.3'
+__version__ = '0.36.6'
 __license__ = 'LGPL'
 
 

@@ -75,8 +75,6 @@ IPv6 support is relatively new and currently limited, specifically:
 
 * `InterfaceChoice.All` is an alias for `InterfaceChoice.Default` on non-POSIX
   systems.
-* On Windows specific interfaces can only be requested as interface indexes,
-  not as IP addresses.
 * Dual-stack IPv6 sockets are used, which may not be supported everywhere (some
   BSD variants do not have them).
 * Listening on localhost (`::1`) does not work. Help with understanding why is
@@ -139,6 +137,91 @@ See examples directory for more.
 
 Changelog
 =========
+
+0.36.6
+======
+
+* Improved performance of sending outgoing packets (#990) @bdraco
+
+0.36.5
+======
+
+* Reduced memory usage for incoming and outgoing packets (#987) @bdraco
+
+0.36.4
+======
+
+* Improved performance of constructing outgoing packets (#978) (#979) @bdraco
+* Deferred parsing of incoming packets when it can be avoided (#983) @bdraco
+
+0.36.3
+======
+
+* Improved performance of parsing incoming packets (#975) @bdraco
+
+0.36.2
+======
+
+* Include NSEC records for non-existent types when responding with addresses (#972) (#971) @bdraco
+  Implements RFC6762 sec 6.2 (http://datatracker.ietf.org/doc/html/rfc6762#section-6.2)
+
+0.36.1
+======
+
+* Skip goodbye packets for addresses when there is another service registered with the same name (#968) @bdraco
+
+  If a ServiceInfo that used the same server name as another ServiceInfo
+  was unregistered, goodbye packets would be sent for the addresses and
+  would cause the other service to be seen as offline.
+* Fixed equality and hash for dns records with the unique bit (#969) @bdraco
+
+  These records should have the same hash and equality since
+  the unique bit (cache flush bit) is not considered when adding or removing
+  the records from the cache.
+
+0.36.0
+======
+
+Technically backwards incompatible:
+
+* Fill incomplete IPv6 tuples to avoid WinError on windows (#965) @lokesh2019
+
+  Fixed #932
+
+0.35.1
+======
+
+* Only reschedule types if the send next time changes (#958) @bdraco
+
+  When the PTR response was seen again, the timer was being canceled and
+  rescheduled even if the timer was for the same time. While this did
+  not cause any breakage, it is quite inefficient.
+* Cache DNS record and question hashes (#960) @bdraco
+
+  The hash was being recalculated every time the object
+  was being used in a set or dict. Since the hashes are
+  effectively immutable, we only calculate them once now.
+
+0.35.0
+======
+
+* Reduced chance of accidental synchronization of ServiceInfo requests (#955) @bdraco
+* Sort aggregated responses to increase chance of name compression (#954) @bdraco
+
+Technically backwards incompatible:
+
+* Send unicast replies on the same socket the query was received (#952) @bdraco
+
+  When replying to a QU question, we do not know if the sending host is reachable
+  from all of the sending sockets. We now avoid this problem by replying via
+  the receiving socket. This was the existing behavior when `InterfaceChoice.Default`
+  is set.
+
+  This change extends the unicast relay behavior to used with `InterfaceChoice.Default`
+  to apply when `InterfaceChoice.All` or interfaces are explicitly passed when
+  instantiating a `Zeroconf` instance.
+
+  Fixes #951
 
 0.34.3
 ======

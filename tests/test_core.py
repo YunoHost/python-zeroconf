@@ -18,8 +18,9 @@ from typing import cast
 from unittest.mock import patch
 
 import zeroconf as r
-from zeroconf import _core, _protocol, const, Zeroconf, current_time_millis
+from zeroconf import _core, const, Zeroconf, current_time_millis
 from zeroconf.asyncio import AsyncZeroconf
+from zeroconf._protocol import outgoing
 
 from . import has_working_ipv6, _clear_cache, _inject_response, _wait_for_start
 
@@ -480,28 +481,28 @@ def test_tc_bit_defers():
 
     next_packet = r.DNSIncoming(packets.pop(0))
     expected_deferred.append(next_packet)
-    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT)
+    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT, None)
     assert protocol._deferred[source_ip] == expected_deferred
     assert source_ip in protocol._timers
 
     next_packet = r.DNSIncoming(packets.pop(0))
     expected_deferred.append(next_packet)
-    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT)
+    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT, None)
     assert protocol._deferred[source_ip] == expected_deferred
     assert source_ip in protocol._timers
-    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT)
-    assert protocol._deferred[source_ip] == expected_deferred
-    assert source_ip in protocol._timers
-
-    next_packet = r.DNSIncoming(packets.pop(0))
-    expected_deferred.append(next_packet)
-    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT)
+    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT, None)
     assert protocol._deferred[source_ip] == expected_deferred
     assert source_ip in protocol._timers
 
     next_packet = r.DNSIncoming(packets.pop(0))
     expected_deferred.append(next_packet)
-    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT)
+    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT, None)
+    assert protocol._deferred[source_ip] == expected_deferred
+    assert source_ip in protocol._timers
+
+    next_packet = r.DNSIncoming(packets.pop(0))
+    expected_deferred.append(next_packet)
+    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT, None)
     assert source_ip not in protocol._deferred
     assert source_ip not in protocol._timers
 
@@ -559,13 +560,13 @@ def test_tc_bit_defers_last_response_missing():
 
     next_packet = r.DNSIncoming(packets.pop(0))
     expected_deferred.append(next_packet)
-    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT)
+    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT, None)
     assert protocol._deferred[source_ip] == expected_deferred
     timer1 = protocol._timers[source_ip]
 
     next_packet = r.DNSIncoming(packets.pop(0))
     expected_deferred.append(next_packet)
-    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT)
+    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT, None)
     assert protocol._deferred[source_ip] == expected_deferred
     timer2 = protocol._timers[source_ip]
     if sys.version_info >= (3, 7):
@@ -573,7 +574,7 @@ def test_tc_bit_defers_last_response_missing():
     assert timer2 != timer1
 
     # Send the same packet again to similar multi interfaces
-    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT)
+    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT, None)
     assert protocol._deferred[source_ip] == expected_deferred
     assert source_ip in protocol._timers
     timer3 = protocol._timers[source_ip]
@@ -583,7 +584,7 @@ def test_tc_bit_defers_last_response_missing():
 
     next_packet = r.DNSIncoming(packets.pop(0))
     expected_deferred.append(next_packet)
-    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT)
+    threadsafe_query(zc, protocol, next_packet, source_ip, const._MDNS_PORT, None)
     assert protocol._deferred[source_ip] == expected_deferred
     assert source_ip in protocol._timers
     timer4 = protocol._timers[source_ip]
@@ -670,8 +671,8 @@ def test_guard_against_oversized_packets():
         )
 
     # We are patching to generate an oversized packet
-    with patch.object(_protocol, "_MAX_MSG_ABSOLUTE", 100000), patch.object(
-        _protocol, "_MAX_MSG_TYPICAL", 100000
+    with patch.object(outgoing, "_MAX_MSG_ABSOLUTE", 100000), patch.object(
+        outgoing, "_MAX_MSG_TYPICAL", 100000
     ):
         over_sized_packet = generated.packets()[0]
         assert len(over_sized_packet) > const._MAX_MSG_ABSOLUTE

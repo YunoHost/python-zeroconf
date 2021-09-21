@@ -108,8 +108,9 @@ class TestRegistrar(unittest.TestCase):
         _process_outgoing_packet(construct_outgoing_multicast_answers(question_answers.mcast_aggregate))
 
         # The additonals should all be suppresed since they are all in the answers section
+        # There will be one NSEC additional to indicate the lack of AAAA record
         #
-        assert nbr_answers == 4 and nbr_additionals == 0 and nbr_authorities == 0
+        assert nbr_answers == 4 and nbr_additionals == 1 and nbr_authorities == 0
         nbr_answers = nbr_additionals = nbr_authorities = 0
 
         # unregister
@@ -143,7 +144,9 @@ class TestRegistrar(unittest.TestCase):
             [r.DNSIncoming(packet) for packet in query.packets()], False
         )
         _process_outgoing_packet(construct_outgoing_multicast_answers(question_answers.mcast_aggregate))
-        assert nbr_answers == 4 and nbr_additionals == 0 and nbr_authorities == 0
+
+        # There will be one NSEC additional to indicate the lack of AAAA record
+        assert nbr_answers == 4 and nbr_additionals == 1 and nbr_authorities == 0
         nbr_answers = nbr_additionals = nbr_authorities = 0
 
         # unregister
@@ -271,7 +274,9 @@ def test_ptr_optimization():
             has_txt = True
         elif answer.type == const._TYPE_A:
             has_a = True
-    assert nbr_answers == 1 and nbr_additionals == 3
+    assert nbr_answers == 1 and nbr_additionals == 4
+    # There will be one NSEC additional to indicate the lack of AAAA record
+
     assert has_srv and has_txt and has_a
 
     # unregister
@@ -406,7 +411,7 @@ def test_unicast_response():
         [r.DNSIncoming(packet) for packet in query.packets()], True
     )
     for answers in (question_answers.ucast, question_answers.mcast_aggregate):
-        has_srv = has_txt = has_a = False
+        has_srv = has_txt = has_a = has_aaaa = has_nsec = False
         nbr_additionals = 0
         nbr_answers = len(answers)
         additionals = set().union(*answers.values())
@@ -418,8 +423,14 @@ def test_unicast_response():
                 has_txt = True
             elif answer.type == const._TYPE_A:
                 has_a = True
-        assert nbr_answers == 1 and nbr_additionals == 3
-        assert has_srv and has_txt and has_a
+            elif answer.type == const._TYPE_AAAA:
+                has_aaaa = True
+            elif answer.type == const._TYPE_NSEC:
+                has_nsec = True
+        # There will be one NSEC additional to indicate the lack of AAAA record
+        assert nbr_answers == 1 and nbr_additionals == 4
+        assert has_srv and has_txt and has_a and has_nsec
+        assert not has_aaaa
 
     # unregister
     zc.registry.async_remove(info)
@@ -497,7 +508,7 @@ def test_qu_response():
     zc.register_service(info)
 
     def _validate_complete_response(answers):
-        has_srv = has_txt = has_a = False
+        has_srv = has_txt = has_a = has_aaaa = has_nsec = False
         nbr_answers = len(answers.keys())
         additionals = set().union(*answers.values())
         nbr_additionals = len(additionals)
@@ -509,8 +520,13 @@ def test_qu_response():
                 has_txt = True
             elif answer.type == const._TYPE_A:
                 has_a = True
-        assert nbr_answers == 1 and nbr_additionals == 3
-        assert has_srv and has_txt and has_a
+            elif answer.type == const._TYPE_AAAA:
+                has_aaaa = True
+            elif answer.type == const._TYPE_NSEC:
+                has_nsec = True
+        assert nbr_answers == 1 and nbr_additionals == 4
+        assert has_srv and has_txt and has_a and has_nsec
+        assert not has_aaaa
 
     # With QU should respond to only unicast when the answer has been recently multicast
     query = r.DNSOutgoing(const._FLAGS_QR_QUERY)
@@ -632,6 +648,21 @@ def test_known_answer_supression():
     question_answers = zc.query_handler.async_response([r.DNSIncoming(packet) for packet in packets], False)
     assert not question_answers.ucast
     assert not question_answers.mcast_now
+    assert not question_answers.mcast_aggregate
+    assert not question_answers.mcast_aggregate_last_second
+
+    # Test NSEC record returned when there is no AAAA record and we expectly ask
+    generated = r.DNSOutgoing(const._FLAGS_QR_QUERY)
+    question = r.DNSQuestion(server_name, const._TYPE_AAAA, const._CLASS_IN)
+    generated.add_question(question)
+    for dns_address in info.dns_addresses():
+        generated.add_answer_at_time(dns_address, now)
+    packets = generated.packets()
+    question_answers = zc.query_handler.async_response([r.DNSIncoming(packet) for packet in packets], False)
+    assert not question_answers.ucast
+    expected_nsec_record: r.DNSNsec = list(question_answers.mcast_now)[0]
+    assert const._TYPE_A not in expected_nsec_record.rdtypes
+    assert const._TYPE_AAAA in expected_nsec_record.rdtypes
     assert not question_answers.mcast_aggregate
     assert not question_answers.mcast_aggregate_last_second
 
@@ -1460,3 +1491,50 @@ async def test_response_aggregation_random_delay():
     assert info3.dns_pointer() not in outgoing_queue.queue[1].answers
     assert info4.dns_pointer() not in outgoing_queue.queue[1].answers
     assert info5.dns_pointer() in outgoing_queue.queue[1].answers
+
+
+@pytest.mark.asyncio
+async def test_future_answers_are_removed_on_send():
+    """Verify any future answers scheduled to be sent are removed when we send."""
+    type_ = "_mservice._tcp.local."
+    type_2 = "_mservice2._tcp.local."
+    name = "xxxyyy"
+    registration_name = f"{name}.{type_}"
+    registration_name2 = f"{name}.{type_2}"
+
+    desc = {'path': '/~paulsm/'}
+    info = ServiceInfo(
+        type_, registration_name, 80, 0, 0, desc, "ash-1.local.", addresses=[socket.inet_aton("10.0.1.2")]
+    )
+    info2 = ServiceInfo(
+        type_2, registration_name2, 80, 0, 0, desc, "ash-2.local.", addresses=[socket.inet_aton("10.0.1.3")]
+    )
+    mocked_zc = unittest.mock.MagicMock()
+    outgoing_queue = MulticastOutgoingQueue(mocked_zc, 0, 0)
+
+    now = current_time_millis()
+    with unittest.mock.patch.object(_handlers, "_MULTICAST_DELAY_RANDOM_INTERVAL", (1, 1)):
+        outgoing_queue.async_add(now, {info.dns_pointer(): set()})
+
+    assert len(outgoing_queue.queue) == 1
+
+    with unittest.mock.patch.object(_handlers, "_MULTICAST_DELAY_RANDOM_INTERVAL", (2, 2)):
+        outgoing_queue.async_add(now, {info.dns_pointer(): set()})
+
+    assert len(outgoing_queue.queue) == 2
+
+    with unittest.mock.patch.object(_handlers, "_MULTICAST_DELAY_RANDOM_INTERVAL", (1000, 1000)):
+        outgoing_queue.async_add(now, {info2.dns_pointer(): set()})
+        outgoing_queue.async_add(now, {info.dns_pointer(): set()})
+
+    assert len(outgoing_queue.queue) == 3
+
+    await asyncio.sleep(0.1)
+    outgoing_queue.async_ready()
+
+    assert len(outgoing_queue.queue) == 1
+    # The answer should get removed because we just sent it
+    assert info.dns_pointer() not in outgoing_queue.queue[0].answers
+
+    # But the one we have not sent yet shoudl still go out later
+    assert info2.dns_pointer() in outgoing_queue.queue[0].answers

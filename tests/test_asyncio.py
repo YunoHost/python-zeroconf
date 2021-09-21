@@ -174,6 +174,140 @@ async def test_async_service_registration() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_service_registration_same_server_different_ports() -> None:
+    """Test registering services with the same server with different srv records."""
+    aiozc = AsyncZeroconf(interfaces=['127.0.0.1'])
+    type_ = "_test1-srvc-type._tcp.local."
+    name = "xxxyyy"
+    name2 = "xxxyyy2"
+
+    registration_name = f"{name}.{type_}"
+    registration_name2 = f"{name2}.{type_}"
+
+    calls = []
+
+    class MyListener(ServiceListener):
+        def add_service(self, zeroconf: Zeroconf, type: str, name: str) -> None:
+            calls.append(("add", type, name))
+
+        def remove_service(self, zeroconf: Zeroconf, type: str, name: str) -> None:
+            calls.append(("remove", type, name))
+
+        def update_service(self, zeroconf: Zeroconf, type: str, name: str) -> None:
+            calls.append(("update", type, name))
+
+    listener = MyListener()
+
+    aiozc.zeroconf.add_service_listener(type_, listener)
+
+    desc = {'path': '/~paulsm/'}
+    info = ServiceInfo(
+        type_,
+        registration_name,
+        80,
+        0,
+        0,
+        desc,
+        "ash-2.local.",
+        addresses=[socket.inet_aton("10.0.1.2")],
+    )
+    info2 = ServiceInfo(
+        type_,
+        registration_name2,
+        81,
+        0,
+        0,
+        desc,
+        "ash-2.local.",
+        addresses=[socket.inet_aton("10.0.1.2")],
+    )
+    tasks = []
+    tasks.append(await aiozc.async_register_service(info))
+    tasks.append(await aiozc.async_register_service(info2))
+    await asyncio.gather(*tasks)
+
+    task = await aiozc.async_unregister_service(info)
+    await task
+    entries = aiozc.zeroconf.cache.async_entries_with_server("ash-2.local.")
+    assert len(entries) == 1
+    assert info2.dns_service() in entries
+    await aiozc.async_close()
+    assert calls == [
+        ('add', type_, registration_name),
+        ('add', type_, registration_name2),
+        ('remove', type_, registration_name),
+        ('remove', type_, registration_name2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_service_registration_same_server_same_ports() -> None:
+    """Test registering services with the same server with the exact same srv record."""
+    aiozc = AsyncZeroconf(interfaces=['127.0.0.1'])
+    type_ = "_test1-srvc-type._tcp.local."
+    name = "xxxyyy"
+    name2 = "xxxyyy2"
+
+    registration_name = f"{name}.{type_}"
+    registration_name2 = f"{name2}.{type_}"
+
+    calls = []
+
+    class MyListener(ServiceListener):
+        def add_service(self, zeroconf: Zeroconf, type: str, name: str) -> None:
+            calls.append(("add", type, name))
+
+        def remove_service(self, zeroconf: Zeroconf, type: str, name: str) -> None:
+            calls.append(("remove", type, name))
+
+        def update_service(self, zeroconf: Zeroconf, type: str, name: str) -> None:
+            calls.append(("update", type, name))
+
+    listener = MyListener()
+
+    aiozc.zeroconf.add_service_listener(type_, listener)
+
+    desc = {'path': '/~paulsm/'}
+    info = ServiceInfo(
+        type_,
+        registration_name,
+        80,
+        0,
+        0,
+        desc,
+        "ash-2.local.",
+        addresses=[socket.inet_aton("10.0.1.2")],
+    )
+    info2 = ServiceInfo(
+        type_,
+        registration_name2,
+        80,
+        0,
+        0,
+        desc,
+        "ash-2.local.",
+        addresses=[socket.inet_aton("10.0.1.2")],
+    )
+    tasks = []
+    tasks.append(await aiozc.async_register_service(info))
+    tasks.append(await aiozc.async_register_service(info2))
+    await asyncio.gather(*tasks)
+
+    task = await aiozc.async_unregister_service(info)
+    await task
+    entries = aiozc.zeroconf.cache.async_entries_with_server("ash-2.local.")
+    assert len(entries) == 1
+    assert info2.dns_service() in entries
+    await aiozc.async_close()
+    assert calls == [
+        ('add', type_, registration_name),
+        ('add', type_, registration_name2),
+        ('remove', type_, registration_name),
+        ('remove', type_, registration_name2),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_async_service_registration_name_conflict() -> None:
     """Test registering services throws on name conflict."""
     aiozc = AsyncZeroconf(interfaces=['127.0.0.1'])
@@ -579,6 +713,7 @@ async def test_async_unregister_all_services() -> None:
     assert results[1] is not None
 
     await aiozc.async_unregister_all_services()
+    _clear_cache(aiozc.zeroconf)
 
     tasks = []
     tasks.append(aiozc.async_get_service_info(type_, registration_name))
@@ -974,12 +1109,14 @@ async def test_legacy_unicast_response(run_isolated):
     query = DNSOutgoing(const._FLAGS_QR_QUERY, multicast=False, id_=888)
     question = DNSQuestion(info.type, const._TYPE_PTR, const._CLASS_IN)
     query.add_question(question)
+    protocol = aiozc.zeroconf.engine.protocols[0]
 
     with patch.object(aiozc.zeroconf, "async_send") as send_mock:
-        aiozc.zeroconf.engine.protocols[0].datagram_received(query.packets()[0], ('127.0.0.1', 6503))
+        protocol.datagram_received(query.packets()[0], ('127.0.0.1', 6503))
 
     calls = send_mock.mock_calls
-    assert calls == [call(ANY, '127.0.0.1', 6503, ())]
+    # Verify the response is sent back on the socket it was recieved from
+    assert calls == [call(ANY, '127.0.0.1', 6503, (), protocol.transport)]
     outgoing = send_mock.call_args[0][0]
     assert isinstance(outgoing, DNSOutgoing)
     assert outgoing.questions == [question]
